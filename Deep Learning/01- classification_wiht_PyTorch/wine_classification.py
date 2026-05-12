@@ -4,9 +4,9 @@ from torch.utils.data import Dataset, DataLoader, random_split
 import torch.nn as nn
 import torch.optim as optim
 import wandb
+import sklearn
 
-
-# ─── 1. Dataset ───────────────────────────────────────────────
+# ───  Dataset ───────────────────────────────────────────────
 def load_data(file_path):
     df = pd.read_csv(file_path)
     print(df.head())
@@ -14,9 +14,9 @@ def load_data(file_path):
     return df
 
 class CustomDataset(Dataset):
-    def __init__(self, dataframe): 
-        self.inputs = torch.tensor(dataframe.drop('Wine', axis=1).values, dtype=torch.float32)
-        self.labels = torch.tensor((dataframe['Wine'].values - 1), dtype=torch.long)
+    def __init__(self, X, y): 
+        self.inputs = torch.tensor(X, dtype=torch.float32)
+        self.labels = torch.tensor(y, dtype=torch.long)
 
     def __len__(self):
         return len(self.inputs)
@@ -36,7 +36,7 @@ def split_dataset(dataset, split_ratio):
     return train_dataset, eval_dataset
 
 
-# ─── 2. Modeling ──────────────────────────────────────────────
+# ─── Modeling ──────────────────────────────────────────────
 class LinearModel(nn.Module):
     def __init__(self, in_dim, out_dim):
         super().__init__()
@@ -45,9 +45,21 @@ class LinearModel(nn.Module):
     def forward(self, input):
         output = self.linear(input)
         return output
+    
+class LinearModelWithActivation(nn.Module):
+    def __init__(self, in_dim, out_dim, hidden_dim=32):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.Sigmoid(),
+            nn.Linear(hidden_dim, out_dim)
+        )
+
+    def forward(self, input):
+        return self.network(input)
 
 
-# ─── 3. Training & Evaluation ─────────────────────────────────
+# ─── Training & Evaluation ─────────────────────────────────
 def train_epoch(model, loss_fn, optimizer, dataloader):
     model.train()
     loss_history = []
@@ -95,7 +107,7 @@ def eval_epoch(model, loss_fn, dataloader):
     return sum(loss_history) / len(loss_history), sum(accuracy_history) / len(accuracy_history)
 
 
-# ─── 4. Main ──────────────────────────────────────────────────
+# ─── Main ──────────────────────────────────────────────────
 def main():
     # Hyperparameters
     N_EPOCHS = 100
@@ -107,15 +119,31 @@ def main():
 
     torch.manual_seed(SEED)
 
-    df = load_data("wine.csv")
-    my_dataset = CustomDataset(dataframe=df)
-    train_dataset, eval_dataset = split_dataset(my_dataset, split_ratio=0.8)
+    df = load_data("/content/wine.csv")
+    
+    # Split DataFrame avant scaling
+    X = df.drop('Wine', axis=1).values
+    y = (df['Wine'].values - 1)
+    
+    split_idx = int(0.8 * len(X))
+    X_train, X_eval = X[:split_idx], X[split_idx:]
+    y_train, y_eval = y[:split_idx], y[split_idx:]
+
+    # Normalisation (fit sur train uniquement)
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_eval = scaler.transform(X_eval)
+
+    # Datasets
+    train_dataset = CustomDataset(X_train, y_train)
+    eval_dataset = CustomDataset(X_eval, y_eval)
 
     train_dataloader = get_dataloader(dataset=train_dataset, batch_size=B_SIZE, shuffle=True)
     eval_dataloader = get_dataloader(dataset=eval_dataset, batch_size=B_SIZE, shuffle=False)
 
-    model_with_sgd = LinearModel(in_dim=IN_DIM, out_dim=OUT_DIM)
-    model_with_adam = LinearModel(in_dim=IN_DIM, out_dim=OUT_DIM)
+    model_with_sgd = LinearModelWithActivation(in_dim=IN_DIM, out_dim=OUT_DIM)
+    model_with_adam = LinearModelWithActivation(in_dim=IN_DIM, out_dim=OUT_DIM)
 
     sgd_optimizer = optim.SGD(model_with_sgd.parameters(), lr=LR) 
     adam_optimizer = optim.Adam(model_with_adam.parameters(), lr=LR)
@@ -126,22 +154,22 @@ def main():
         ("SGD", model_with_sgd, sgd_optimizer),
         ("Adam", model_with_adam, adam_optimizer)
     ]:
-    
         wandb.init(
-            project="wine-classification", 
-            name="run_" + optimizer_name,
+            project="wine-classification",
+            name=f"run_{optimizer_name}",
             config={
                 "epochs": N_EPOCHS,
                 "batch_size": B_SIZE,
                 "learning_rate": LR,
                 "optimizer": optimizer_name,
-                "in_dim": IN_DIM,
-                "out_dim": OUT_DIM
+                "normalized": True,
+                "activation": "sigmoid",
+                "hidden_dim": 32
             }
         )
 
         print(f"\n{'='*50}")
-        print(f"Training with {optimizer_name} optimizer:")
+        print(f"Training with {optimizer_name} optimizer (normalized):")
         print(f"{'='*50}")
 
         for epoch in range(N_EPOCHS):
